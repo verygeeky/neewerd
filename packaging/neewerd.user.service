@@ -1,0 +1,26 @@
+# systemd USER service — the lowest-friction option on a desktop, because it
+# inherits your session's BlueZ/DBus access (no polkit fuss).
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/neewerd.user.service ~/.config/systemd/user/neewerd.service
+#   cp neewerd.example.toml ~/.config/neewerd.toml   # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now neewerd
+#   # to keep it running when you're logged out:
+#   sudo loginctl enable-linger "$USER"
+
+[Unit]
+Description=neewerd (user) - Neewer light BLE control daemon
+After=bluetooth.target
+
+[Service]
+Type=simple
+# Adjust to your install: the console script (pipx / pip install neewerd[all])
+# or a venv's python -m neewerd.
+ExecStart=%h/.local/bin/neewerd
+Environment=NEEWERD_CONFIG=%h/.config/neewerd.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

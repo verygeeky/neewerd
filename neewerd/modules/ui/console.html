@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<!--
+  neewerd console — the "v2" web UI: a richer control surface than the basic
+  index.html page, served same-origin by http.py at GET /console.
+
+  It drives the daemon entirely through the structured /api/v1 layer:
+    GET  /api/v1/state              -> tube snapshot (poll fallback)
+    GET  /api/v1/events             -> Server-Sent-Events stream of that snapshot
+    POST /api/v1/<target>/power     {"on": bool}
+    POST /api/v1/<target>/hsi       {"h","s","i"}
+    POST /api/v1/<target>/cct       {"bri","temp","gm"}
+    POST /api/v1/<target>/bri       {"bri"}
+    POST /api/v1/<target>/scene     {"effect":N,"params":[...]}
+    POST /api/v1/flow/<mode>        {"args":["speed=..","spread=.."]}
+    POST /api/v1/stop               cancel any running effect
+    GET  /api/v1/presets            -> {name: [command lines]}
+    POST /api/v1/preset/<name>      run a named preset
+    GET  /api/v1/targets            -> addressable targets + groups/aliases
+    GET  /api/v1/catalog            -> the machine-readable protocol catalogue
+
+  What is live vs stubbed:
+    - Live: per-tube cards with connection/power/battery/power_source/firmware/
+      temperature (from /api/v1/state, pushed via SSE), an HSI colour wheel,
+      CCT (temp/GM/brightness), scene params, flow choreography, presets, a
+      target picker fed by /api/v1/targets (tubes + device-book groups/aliases),
+      and per-tube capability gating from the snapshot's `caps` (the pixel
+      section greys out when the selection has no pixel-capable fixture).
+    - Stubbed (clearly labelled, disabled): the TL120C pixel-palette *editor*.
+      The backend endpoint exists (POST /api/v1/<target>/pixel takes palette
+      colour tokens), but the full editor (per-slot CCT/HSI popovers, effect
+      picker, transport controls) is a later phase — deliberately not faked.
+
+  Vanilla HTML/CSS/JS. No build step, no framework, no dependencies. The colour
+  wheel is a hand-rolled CSS-gradient wheel (no vendored library needed).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>neewerd console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1014; --panel: #1b1c24; --panel2: #23252f; --line: #2c2e3a;
+      --ink: #e7e7ea; --dim: #9a9aa6; --muted: #74747f;
+      --ok: #46d160; --bad: #d14646; --accent: #6b8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif; margin: 0;
+      background: var(--bg); color: var(--ink);
+      padding: 1rem; max-width: 1000px; margin-inline: auto;
+    }
+    header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem; }
+    header h1 { font-size: 1.25rem; margin: 0; }
+    header .link { font-size: .8rem; color: var(--dim); text-decoration: none; }
+    header .spacer { flex: 1; }
+    #conn-dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--muted); }
+    #conn-dot.live { background: var(--ok); } #conn-dot.poll { background: #d1a046; }
+
+    .grid { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+    @media (min-width: 760px) { .grid.two { grid-template-columns: 1fr 1fr; } }
+
+    section {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 1rem;
+    }
+    section h2 { font-size: .95rem; margin: 0 0 .75rem; color: var(--dim); font-weight: 600; }
+    .muted { color: var(--muted); font-size: .8rem; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    label { display: block; font-size: .8rem; margin: .6rem 0 .15rem; color: var(--dim); }
+    .val { font-variant-numeric: tabular-nums; color: var(--ink); }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    input[type=number], select {
+      font: inherit; background: var(--panel2); color: var(--ink);
+      border: 1px solid var(--line); border-radius: 7px; padding: .35rem .5rem;
+    }
+    button {
+      font: inherit; background: var(--panel2); color: var(--ink);
+      border: 1px solid var(--line); border-radius: 8px;
+      padding: .45rem .8rem; cursor: pointer;
+    }
+    button:hover { background: #2e313d; } button:active { transform: translateY(1px); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #0b0d18; font-weight: 600; }
+    button.danger { border-color: #6b2e2e; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* Device cards */
+    #cards { display: grid; gap: .6rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+    .card {
+      background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+      padding: .6rem .7rem; cursor: pointer; transition: border-color .1s;
+    }
+    .card:hover { border-color: #3c3f4d; }
+    .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .card .top { display: flex; align-items: center; gap: .4rem; }
+    .card .name { font-weight: 600; font-size: .9rem; }
+    .card .tgt { color: var(--muted); font-size: .75rem; margin-left: auto; }
+    .card .meta { margin-top: .4rem; display: flex; flex-wrap: wrap; gap: .35rem; }
+    .chip {
+      font-size: .72rem; background: #191a22; border: 1px solid var(--line);
+      border-radius: 999px; padding: .1rem .5rem; color: var(--dim);
+    }
+    .dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; }
+    .dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
+    /* A disconnected tube is dimmed whole-card so the eye skips it. */
+    .card.offline { opacity: .5; }
+    .card .badge {
+      font-size: .68rem; border-radius: 999px; padding: .05rem .45rem;
+      margin-left: .3rem; border: 1px solid var(--line); color: var(--dim);
+    }
+    .card .badge.up { color: var(--ok); border-color: #2e6b3a; }
+    .card .badge.down { color: var(--bad); border-color: #6b2e2e; }
+    /* net-id badges: a real group reads as informative, FFFFFFFF as muted. */
+    .chip.net { color: var(--accent); border-color: #33406b; }
+    .chip.net.broadcast { color: var(--muted); }
+    .chip.warn { color: #d1a046; border-color: #6b5a2e; }
+
+    /* Governor telemetry block on a card */
+    .gov {
+      margin-top: .45rem; padding-top: .4rem; border-top: 1px dashed var(--line);
+      display: flex; flex-wrap: wrap; gap: .3rem; align-items: center;
+    }
+    .gov .pill {
+      font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
+      background: #191a22; border: 1px solid var(--line); border-radius: 999px;
+      padding: .05rem .45rem; color: var(--accent);
+    }
+    .gov .stat { font-size: .7rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+    .gov .stat b { color: var(--ink); font-weight: 600; }
+    .gov .shed {
+      font-size: .68rem; color: #0b0d18; background: #d1a046;
+      border-radius: 999px; padding: .05rem .45rem; font-weight: 600;
+    }
+    .gov .stat.hot b { color: #d1a046; }
+
+    /* System-health summary panel */
+    #system { margin-bottom: 1rem; }
+    #system .stats { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: baseline; }
+    #system .stat { font-size: .8rem; color: var(--dim); }
+    #system .stat .num { font-size: 1.35rem; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+    #system .stat .num.warn { color: #d1a046; }
+    #backpressure {
+      margin-top: .6rem; padding: .4rem .6rem; border-radius: 8px;
+      font-size: .8rem; background: #2a2411; border: 1px solid #6b5a2e; color: #f0c674;
+    }
+    #backpressure[hidden] { display: none; }
+    #system .legend { margin-top: .6rem; font-size: .72rem; color: var(--muted); line-height: 1.5; }
+
+    /* HSI colour wheel */
+    .wheel-wrap { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    #wheel {
+      position: relative; width: 200px; height: 200px; border-radius: 50%;
+      touch-action: none; flex: none;
+      /* white centre = low saturation, over a hue ring. `from 90deg` puts hue 0
+         (red) at 3 o'clock so it lines up with atan2(dy,dx) in the picker math. */
+      background:
+        radial-gradient(circle closest-side, #fff, rgba(255,255,255,0) 78%),
+        conic-gradient(from 90deg,
+          hsl(0 100% 50%), hsl(60 100% 50%), hsl(120 100% 50%),
+          hsl(180 100% 50%), hsl(240 100% 50%), hsl(300 100% 50%), hsl(360 100% 50%));
+      border: 1px solid var(--line);
+    }
+    #thumb {
+      position: absolute; width: 18px; height: 18px; border-radius: 50%;
+      border: 2px solid #fff; box-shadow: 0 0 0 1px #000; transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .wheel-side { flex: 1; min-width: 200px; }
+    #swatch { width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--line); }
+
+    /* gradient-backed sliders (semantic bars) */
+    .temp-bar { background: linear-gradient(90deg, #ffb46b, #fff, #bcd6ff); height: 8px; border-radius: 4px; }
+    .gm-bar { background: linear-gradient(90deg, #d14fd1, #888, #4fd14f); height: 8px; border-radius: 4px; }
+
+    #log {
+      position: sticky; bottom: 0; margin-top: 1rem; padding: .55rem .7rem;
+      border-radius: 8px; font-size: .85rem; background: var(--panel);
+      border: 1px solid var(--line); min-height: 1.2rem;
+    }
+    #log.ok { border-color: #2e6b3a; } #log.err { border-color: #6b2e2e; }
+    .stub { opacity: .6; }
+    .stub-note { font-size: .78rem; color: #d1a046; margin-top: .4rem; }
+    /* Capability gating: the selection has no fixture with the feature. */
+    .nocap { opacity: .3; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>neewerd console</h1>
+    <span id="conn-dot" title="live-state channel"></span>
+    <span class="muted" id="conn-label">connecting&hellip;</span>
+    <span class="spacer"></span>
+    <a class="link" href="/">basic UI &rarr;</a>
+  </header>
+
+  <!-- System health (fleet-wide summary + backpressure signal) -->
+  <section id="system">
+    <h2>System health</h2>
+    <div class="stats">
+      <div class="stat"><span class="num" id="sys-connected">–</span><br>connected</div>
+      <div class="stat"><span class="num" id="sys-writerate">0</span><br>writes/s (fleet)</div>
+      <div class="stat"><span class="num" id="sys-deferrate">0</span><br>deferred/s</div>
+    </div>
+    <div id="backpressure" hidden></div>
+    <p class="legend">
+      <b>writes/s</b>: BLE frames actually delivered to the tubes (the light-side
+      ceiling, not the incoming Art-Net rate). <b>deferred/s</b>: frames the
+      write-governor <em>shed</em> to stay at pace — any sustained value &gt; 0 means
+      the source is overfeeding / the lights are at capacity (backpressure).
+      Per-card: <span class="pill" style="color:var(--accent)">MODE</span> is the
+      governor's BBR phase, <b>BtlBw</b> its measured bottleneck bandwidth,
+      <b>rtt</b> the min round-trip (amber if markedly elevated).
+    </p>
+  </section>
+
+  <!-- Devices -->
+  <section style="margin-bottom:1rem">
+    <div class="row" style="justify-content: space-between">
+      <h2 style="margin:0">Devices</h2>
+      <div class="row">
+        <span class="muted">target:</span>
+        <select id="target"><option value="all">all</option></select>
+        <button id="refresh" title="force a state poll">Refresh</button>
+      </div>
+    </div>
+    <div id="cards" style="margin-top:.75rem"><span class="muted">loading&hellip;</span></div>
+  </section>
+
+  <div class="grid two">
+    <!-- Power -->
+    <section>
+      <h2>Power &amp; brightness</h2>
+      <div class="row">
+        <button id="power-on" class="primary">On</button>
+        <button id="power-off">Off</button>
+      </div>
+      <label>Brightness <span class="val" id="bri-val">80</span>%</label>
+      <input type="range" id="bri" min="0" max="100" value="80">
+      <div class="row" style="margin-top:.5rem"><button id="bri-send">Apply brightness</button></div>
+    </section>
+
+    <!-- Presets -->
+    <section>
+      <h2>Presets <span class="muted">(global)</span></h2>
+      <div class="row" id="presets"><span class="muted">loading&hellip;</span></div>
+    </section>
+  </div>
+
+  <!-- HSI colour -->
+  <section style="margin-top:1rem">
+    <h2>Colour (HSI)</h2>
+    <div class="wheel-wrap">
+      <div id="wheel"><div id="thumb"></div></div>
+      <div class="wheel-side">
+        <label>Hue <span class="val" id="h-val">240</span>&deg;</label>
+        <input type="range" id="h" min="0" max="360" value="240">
+        <label>Saturation <span class="val" id="s-val">100</span>%</label>
+        <input type="range" id="s" min="0" max="100" value="100">
+        <label>Intensity <span class="val" id="i-val">80</span>%</label>
+        <input type="range" id="i" min="0" max="100" value="80">
+        <div id="swatch" style="margin-top:.5rem"></div>
+        <div class="row" style="margin-top:.6rem">
+          <button id="hsi-send" class="primary">Apply HSI</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CCT white -->
+  <section style="margin-top:1rem">
+    <h2>White (CCT)</h2>
+    <label>Brightness <span class="val" id="cbri-val">50</span>%</label>
+    <input type="range" id="cbri" min="0" max="100" value="50">
+    <!-- temp is sent in hundreds of Kelvin (frames.py CCT_MIN=32..CCT_MAX=85). -->
+    <label>Temperature <span class="val" id="temp-val">5600</span> K</label>
+    <div class="temp-bar"></div>
+    <input type="range" id="temp" min="32" max="85" value="56">
+    <!-- green/magenta tint: 0..100, 50 neutral (frames.GM_NEUTRAL). -->
+    <label>G/M tint <span class="val" id="gm-val">0</span></label>
+    <div class="gm-bar"></div>
+    <input type="range" id="gm" min="0" max="100" value="50">
+    <div class="row" style="margin-top:.6rem"><button id="cct-send" class="primary">Apply CCT</button></div>
+  </section>
+
+  <div class="grid two" style="margin-top:1rem">
+    <!-- Scene -->
+    <section>
+      <h2>Scene / FX</h2>
+      <div class="row">
+        <label style="margin:0">effect #</label>
+        <input type="number" id="scene-effect" min="0" max="30" value="1" style="width:5rem">
+      </div>
+      <label>Parameters <span class="muted">(space/comma separated, effect-specific)</span></label>
+      <input type="text" id="scene-params" placeholder="e.g. 50 20" style="width:100%">
+      <div class="row" style="margin-top:.6rem"><button id="scene-send" class="primary">Send scene</button></div>
+      <p class="muted" style="margin:.5rem 0 0">
+        Param meaning is per-effect and per-model; the TL120C ignores the legacy
+        <code>0x88</code> scene (see PROTOCOL.md). Verify against your fixture.
+      </p>
+    </section>
+
+    <!-- Flow choreography -->
+    <section>
+      <h2>Flow <span class="muted">(global, multi-tube)</span></h2>
+      <div class="row">
+        <select id="flow-mode">
+          <option value="hue">hue</option>
+          <option value="comet">comet</option>
+          <option value="palette" selected>palette</option>
+          <option value="tri">tri</option>
+          <option value="multistop">multistop</option>
+        </select>
+      </div>
+      <label>Speed <span class="val" id="flow-speed-val">0.10</span></label>
+      <input type="range" id="flow-speed" min="1" max="200" value="10">
+      <label>Spread <span class="val" id="flow-spread-val">0.18</span></label>
+      <input type="range" id="flow-spread" min="0" max="100" value="18">
+      <div class="row" style="margin-top:.6rem">
+        <button id="flow-start" class="primary">Start flow</button>
+        <button id="flow-stop" class="danger">Stop</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Pixel palette editor — the full editor is a later phase; the section is
+       capability-gated now (greyed out when the selection has no pixel-capable
+       fixture, per the snapshot's per-tube `caps`). -->
+  <section class="stub" id="pixel-section" style="margin-top:1rem">
+    <h2>Pixel palette editor <span class="muted">(TL120C)</span></h2>
+    <div class="row">
+      <button disabled>slot 1</button><button disabled>slot 2</button>
+      <button disabled>slot 3</button><button disabled>slot 4</button>
+      <button disabled>slot 5</button><button disabled>slot 6</button>
+      <button disabled>slot 7</button><button disabled>slot 8</button>
+    </div>
+    <p class="stub-note" id="pixel-note">
+      The palette editor arrives in a later phase (the backend
+      <code>POST /api/v1/&lt;target&gt;/pixel</code> endpoint already exists).
+    </p>
+  </section>
+
+  <div id="log" class="muted">ready</div>
+
+  <script>
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const target = () => $("target").value;
+
+  // ---- API plumbing ------------------------------------------------------
+  /** Show the outcome of an action on the sticky log line. */
+  function report(status, body) {
+    const el = $("log");
+    const ok = status >= 200 && status < 300;
+    // The /api/v1 layer wraps replies as {"result":...} / {"error":...}.
+    const msg = (body && (body.result ?? body.error)) ?? JSON.stringify(body);
+    el.textContent = `${status} — ${msg}`;
+    el.className = ok ? "ok" : "err";
+  }
+
+  /** POST JSON to an /api/v1 path and surface the result. */
+  async function api(path, payload) {
+    try {
+      const opts = { method: "POST" };
+      if (payload !== undefined) opts.body = JSON.stringify(payload);
+      const res = await fetch(path, opts);
+      const body = await res.json().catch(() => ({}));
+      report(res.status, body);
+      return res.ok;
+    } catch (err) {
+      report(0, { error: `network error: ${err}` });
+      return false;
+    }
+  }
+
+  // ---- device cards + target selector ------------------------------------
+  let lastSnap = {};
+
+  // Device-book groups/aliases from /api/v1/targets — extra target words the
+  // dropdown offers beyond the per-tube entries. Loaded once at boot; the
+  // console degrades to tubes-only if the endpoint is unavailable.
+  let targetsInfo = { groups: {}, aliases: {} };
+
+  async function loadTargets() {
+    try {
+      const res = await fetch("/api/v1/targets");
+      const data = await res.json();
+      targetsInfo = { groups: data.groups ?? {}, aliases: data.aliases ?? {} };
+      renderState(lastSnap);   // re-render so the dropdown picks the extras up
+    } catch (_) { /* discovery is optional; the dropdown works from state */ }
+  }
+
+  /** Expand a target word to the MACs it addresses, using the same vocabulary
+   *  as the daemon (all / t<pos> / MAC / alias / group, groups nestable).
+   *  Returns [] when the word resolves to nothing we know. */
+  function expandTarget(word, seen = new Set()) {
+    const w = String(word), lw = w.toLowerCase();
+    if (lw === "all") return Object.keys(lastSnap);
+    if (w in lastSnap) return [w];
+    if (w.toUpperCase() in lastSnap) return [w.toUpperCase()];
+    const pos = /^t(\d+)$/i.exec(w);
+    if (pos) {
+      return Object.entries(lastSnap)
+        .filter(([, t]) => t.pos === +pos[1]).map(([mac]) => mac);
+    }
+    if (targetsInfo.aliases[lw]) return expandTarget(targetsInfo.aliases[lw], seen);
+    if (targetsInfo.groups[lw] && !seen.has(lw)) {
+      seen.add(lw);   // guard against group cycles
+      return [...new Set(targetsInfo.groups[lw]
+        .flatMap((member) => expandTarget(member, seen)))];
+    }
+    return [];
+  }
+
+  /** True when the current selection can take a capability-gated command.
+   *  Permissive on ignorance: an unresolvable word or a snapshot without caps
+   *  info never greys a control — only known-incapable selections do. */
+  function selectionHasCap(cap) {
+    const macs = expandTarget(target());
+    if (macs.length === 0) return true;              // unresolvable — don't gate
+    const withCaps = macs.map((m) => lastSnap[m]).filter((t) => t && t.caps);
+    if (withCaps.length === 0) return true;          // caps unknown — permissive
+    return withCaps.some((t) => t.caps[cap]);
+  }
+
+  /** Grey out / annotate the capability-gated sections for the selection. */
+  function updateCapsGating() {
+    const pixelOk = selectionHasCap("pixel");
+    $("pixel-section").classList.toggle("nocap", !pixelOk);
+    $("pixel-note").textContent = pixelOk
+      ? "The palette editor arrives in a later phase (the backend "
+        + "POST /api/v1/<target>/pixel endpoint already exists)."
+      : "No pixel-capable fixture in the current selection (pixel is a "
+        + "TL120C feature) — pixel commands would be skipped.";
+  }
+
+  // Governor counters are cumulative, so a *rate* (deferred/s, writes/s) is a
+  // delta over wall time. We remember the previous {sent,deferred,t} per mac and
+  // divide by the elapsed seconds between SSE frames. Cleared when a mac vanishes.
+  const govPrev = new Map();   // mac -> { sent, deferred, t (ms) }
+
+  /** Physical-position target (t<N>) if the tube has one, else its MAC. */
+  function tubeTarget(mac, t) { return (t.pos != null) ? `t${t.pos}` : mac; }
+
+  /** Net-id = the fixture's networkId unit-id (advert '&' suffix). Prefer the
+   *  daemon-parsed `unit` field; fall back to slicing the name for old payloads. */
+  function netId(t) {
+    if (t.unit != null) return t.unit;
+    const name = t.name ?? "";
+    const amp = name.indexOf("&");
+    return amp >= 0 ? name.slice(amp + 1) : null;
+  }
+
+  /** The prominent per-device unit label. Prefers the configured unit_name, then
+   *  the raw &<networkId>, then falls back to the existing identifier (name/mac)
+   *  so a tube with no networkId never loses its heading. */
+  function unitLabel(t, mac) {
+    if (t.unit_name) return t.unit_name;
+    const net = netId(t);
+    if (net) return "&" + net;
+    return t.name ?? mac;
+  }
+
+  /** Sort key so tubes group/order by unit: by unit_name when configured, else by
+   *  the networkId hex, else the raw name — un-keyed tubes sort last. */
+  function unitSortKey(t, mac) {
+    if (t.unit_name) return "0" + t.unit_name.toLowerCase();
+    const net = netId(t);
+    if (net) return "1" + net.toLowerCase();
+    return "2" + String(t.name ?? mac).toLowerCase();
+  }
+
+  /** Rough signal-strength label from an RSSI in dBm. */
+  function signalLabel(rssi) {
+    if (rssi == null) return null;
+    if (rssi >= -60) return "strong";
+    if (rssi >= -75) return "ok";
+    if (rssi >= -88) return "weak";
+    return "poor";
+  }
+
+  /** Escape text bound into innerHTML (names/versions come off the wire). */
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function renderState(snap) {
+    lastSnap = snap;
+    const now = Date.now();
+    // Order tubes by their unit key so they group by unit-name / networkId. This
+    // re-applies on every render, so live SSE updates keep the same ordering.
+    const entries = Object.entries(snap).sort((a, b) =>
+      unitSortKey(a[1], a[0]).localeCompare(unitSortKey(b[1], b[0])));
+    const cards = $("cards");
+    const keep = target();
+
+    // Compute per-tube governor rates (deferred/s, writes/s) from counter deltas,
+    // then fold the results back so both the cards and the system panel read them.
+    const govRates = {};
+    for (const [mac, t] of entries) {
+      if (!t.gov) { govPrev.delete(mac); continue; }
+      const prev = govPrev.get(mac);
+      let deferredPerS = null, sentPerS = null;
+      if (prev) {
+        const dt = (now - prev.t) / 1000;
+        if (dt > 0) {
+          deferredPerS = Math.max(0, (t.gov.deferred - prev.deferred) / dt);
+          sentPerS = Math.max(0, (t.gov.sent - prev.sent) / dt);
+        }
+      }
+      govPrev.set(mac, { sent: t.gov.sent, deferred: t.gov.deferred, t: now });
+      govRates[mac] = { deferredPerS, sentPerS };
+    }
+    // Drop remembered state for tubes that left the snapshot entirely.
+    for (const mac of [...govPrev.keys()]) if (!(mac in snap)) govPrev.delete(mac);
+
+    // Rebuild the target dropdown, preserving the current selection.
+    const opts = ['<option value="all">all</option>'];
+    cards.innerHTML = "";
+    if (entries.length === 0) {
+      cards.innerHTML = '<span class="muted">no tubes known</span>';
+    }
+    for (const [mac, t] of entries) {
+      const tgt = tubeTarget(mac, t);
+      opts.push(`<option value="${tgt}">${tgt} — ${esc(t.name ?? mac)}</option>`);
+      cards.appendChild(deviceCard(mac, t, tgt, govRates[mac]));
+    }
+    // Device-book groups and aliases (from /api/v1/targets) are addressable
+    // words too — offer them after the per-tube entries.
+    const groups = Object.keys(targetsInfo.groups ?? {});
+    if (groups.length) {
+      opts.push('<optgroup label="groups">');
+      for (const g of groups) opts.push(`<option value="${esc(g)}">${esc(g)}</option>`);
+      opts.push("</optgroup>");
+    }
+    const aliases = Object.entries(targetsInfo.aliases ?? {});
+    if (aliases.length) {
+      opts.push('<optgroup label="aliases">');
+      for (const [name, mac] of aliases) {
+        opts.push(`<option value="${esc(name)}">${esc(name)} — ${esc(mac)}</option>`);
+      }
+      opts.push("</optgroup>");
+    }
+    const sel = $("target");
+    sel.innerHTML = opts.join("");
+    sel.value = [...sel.options].some(o => o.value === keep) ? keep : "all";
+    highlightSelected();
+    updateCapsGating();
+    renderSystem(entries, govRates);
+  }
+
+  /** One tube card: everything we know — identity, telemetry, and (if patched to
+   *  Art-Net) its write-governor control state. Missing fields are simply omitted. */
+  function deviceCard(mac, t, tgt, rates) {
+    const card = document.createElement("div");
+    card.className = "card" + (t.connected ? "" : " offline");
+    card.dataset.target = tgt;
+
+    // --- telemetry chips (each hidden when its field is absent) ---
+    const chips = [];
+    chips.push(`<span class="chip">${esc(t.model ?? "generic")}</span>`);
+    // Capability highlight: pixel is the one gated special (TL120C) feature.
+    if (t.caps && t.caps.pixel) chips.push('<span class="chip">pixel</span>');
+    if (t.power) chips.push(`<span class="chip">power ${esc(t.power)}</span>`);
+    if (t.mode) chips.push(`<span class="chip">${esc(t.mode)}</span>`);
+    // battery + a battery/mains glyph inferred from power_source.
+    if (t.battery != null) {
+      const mains = /ext|mains|dc|adapter/i.test(t.power_source ?? "");
+      chips.push(`<span class="chip">${mains ? "🔌" : "🔋"} ${t.battery}%</span>`);
+    } else if (t.power_source) {
+      chips.push(`<span class="chip">${esc(t.power_source)}</span>`);
+    }
+    if (t.temp_c != null) chips.push(`<span class="chip">🌡 ${t.temp_c}°C</span>`);
+    if (t.rssi != null) {
+      const sig = signalLabel(t.rssi);
+      chips.push(`<span class="chip">📶 ${t.rssi}dBm${sig ? " · " + sig : ""}</span>`);
+    }
+    if (t.version) chips.push(`<span class="chip">fw ${esc(t.version)}</span>`);
+    const net = netId(t);
+    if (net) {
+      const bcast = net.toUpperCase() === "FFFFFFFF";
+      chips.push(`<span class="chip net${bcast ? " broadcast" : ""}">`
+        + `net ${bcast ? "FFFFFFFF (ungrouped)" : esc(net)}</span>`);
+    }
+    const chipHtml = chips.join("");
+
+    // --- governor block (only when the tube is Art-Net patched) ---
+    let govHtml = "";
+    if (t.gov) {
+      const g = t.gov;
+      const rttMs = (g.min_rtt != null) ? (g.min_rtt * 1000).toFixed(0) + "ms" : "—";
+      // "markedly above usual": flag rtt that's well past a healthy BLE round trip.
+      const rttHot = (g.min_rtt != null && g.min_rtt * 1000 > 120) ? " hot" : "";
+      const defPerS = rates && rates.deferredPerS != null ? rates.deferredPerS : 0;
+      const shedding = defPerS > 0;
+      govHtml =
+        `<div class="gov">
+           <span class="pill">${esc(g.mode ?? "?")}</span>
+           <span class="stat">rate <b>${g.rate.toFixed(0)}</b>/s</span>
+           <span class="stat">BtlBw <b>${g.bw.toFixed(0)}</b>/s</span>
+           <span class="stat${rttHot}">rtt <b>${rttMs}</b></span>
+           ${shedding
+             ? `<span class="shed">shedding ${defPerS.toFixed(1)}/s</span>`
+             : `<span class="stat">def <b>0</b>/s</span>`}
+         </div>`;
+    }
+
+    const connBadge = t.connected
+      ? '<span class="badge up">connected</span>'
+      : '<span class="badge down">disconnected</span>';
+    // Prominent heading = the unit label (configured unit_name > &networkId >
+    // name/mac). Keep the raw advertised name as a hover title so it's not lost.
+    const heading = unitLabel(t, mac);
+    const rawName = t.name ?? mac;
+    card.innerHTML =
+      `<div class="top">
+         <span class="dot ${t.connected ? "on" : "off"}"></span>
+         <span class="name" title="${esc(rawName)}">${esc(heading)}</span>
+         <span class="tgt">${esc(tgt)}</span>
+       </div>
+       <div class="row" style="gap:.25rem;margin-top:.15rem">${connBadge}</div>
+       <div class="meta">${chipHtml}</div>
+       ${govHtml}
+       ${t.last ? `<div class="muted" style="margin-top:.35rem;font-family:ui-monospace,monospace;font-size:.68rem">↳ ${esc(t.last)}</div>` : ""}`;
+    card.onclick = () => { $("target").value = tgt; highlightSelected(); updateCapsGating(); };
+    return card;
+  }
+
+  /** Fleet-wide health summary: connected count, aggregate write + deferred rate,
+   *  and a prominent backpressure warning whenever the fleet is shedding. */
+  function renderSystem(entries, govRates) {
+    const total = entries.length;
+    const connected = entries.filter(([, t]) => t.connected).length;
+    let writeRate = 0, deferRate = 0, haveWrite = false, haveDefer = false;
+    for (const [mac, t] of entries) {
+      if (!t.gov) continue;
+      // Prefer the governor's own instantaneous rate; fall back to the measured
+      // delivered-sent delta when the governor hasn't published a rate yet.
+      const r = govRates[mac] || {};
+      if (t.gov.rate != null) { writeRate += t.gov.rate; haveWrite = true; }
+      else if (r.sentPerS != null) { writeRate += r.sentPerS; haveWrite = true; }
+      if (r.deferredPerS != null) { deferRate += r.deferredPerS; haveDefer = true; }
+    }
+    $("sys-connected").textContent = `${connected}/${total}`;
+    $("sys-writerate").textContent = haveWrite ? writeRate.toFixed(0) : "0";
+    const defEl = $("sys-deferrate");
+    defEl.textContent = haveDefer ? deferRate.toFixed(1) : "0";
+    defEl.classList.toggle("warn", deferRate > 0);
+
+    const bp = $("backpressure");
+    if (deferRate > 0) {
+      bp.hidden = false;
+      bp.innerHTML = `⚠ <b>backpressure</b>: shedding ${deferRate.toFixed(1)} `
+        + `frame(s)/s across the fleet — the source is overfeeding or the lights `
+        + `are at their BLE write ceiling. Reduce the DMX/effect rate.`;
+    } else {
+      bp.hidden = true;
+    }
+  }
+
+  /** Mark the card whose target matches the dropdown as selected. */
+  function highlightSelected() {
+    const t = target();
+    for (const card of document.querySelectorAll(".card")) {
+      card.classList.toggle("selected", card.dataset.target === t);
+    }
+  }
+  $("target").addEventListener("change", () => {
+    highlightSelected();
+    updateCapsGating();       // re-gate the capability-bound sections
+  });
+
+  // ---- live state: SSE with a polling fallback ---------------------------
+  async function pollOnce() {
+    try {
+      const res = await fetch("/api/v1/state");
+      renderState(await res.json());
+    } catch (err) {
+      report(0, { error: `cannot read state: ${err}` });
+    }
+  }
+
+  let pollTimer = null;
+  function setChannel(kind) {
+    // kind: "live" (SSE), "poll" (fallback), or "" (connecting).
+    $("conn-dot").className = kind;
+    $("conn-label").textContent =
+      kind === "live" ? "live (SSE)" : kind === "poll" ? "polling" : "connecting…";
+  }
+
+  function startLiveState() {
+    // Prefer the push channel; fall back to a 3s poll if SSE is unavailable or
+    // errors (older proxies, curl-only setups). EventSource auto-reconnects.
+    if (!("EventSource" in window)) { startPolling(); return; }
+    const es = new EventSource("/api/v1/events");
+    es.addEventListener("state", (ev) => {
+      setChannel("live");
+      clearInterval(pollTimer); pollTimer = null;
+      try { renderState(JSON.parse(ev.data)); } catch (_) { /* ignore partial */ }
+    });
+    es.onerror = () => {
+      // Connection dropped; EventSource will retry, but keep a poll alive
+      // meanwhile so the UI never goes stale.
+      setChannel("poll");
+      if (!pollTimer) startPolling();
+    };
+  }
+
+  function startPolling() {
+    setChannel("poll");
+    pollOnce();
+    clearInterval(pollTimer);
+    pollTimer = setInterval(pollOnce, 3000);
+  }
+
+  $("refresh").onclick = pollOnce;
+
+  // ---- HSI colour wheel ---------------------------------------------------
+  function hsiToRgb(h, s, i) {
+    s /= 100; i /= 100;
+    const c = (1 - Math.abs(2 * i - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = i - c / 2;
+    const [r, g, b] = (
+      h < 60  ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] :
+      h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x]);
+    const hex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+    return `#${hex(r)}${hex(g)}${hex(b)}`;
+  }
+
+  /** Reflect the h/s/i sliders onto the wheel thumb + swatch. */
+  function syncColour() {
+    const h = +$("h").value, s = +$("s").value, i = +$("i").value;
+    $("h-val").textContent = h; $("s-val").textContent = s; $("i-val").textContent = i;
+    $("swatch").style.background = hsiToRgb(h, s, i);
+    // Place the thumb: angle = hue, radius = saturation. The +90° base and the
+    // sign match the wheel's `conic-gradient(from 90deg)` background.
+    const wheel = $("wheel");
+    const R = wheel.clientWidth / 2;
+    const rad = h * Math.PI / 180;
+    const radius = (s / 100) * (R - 9);
+    $("thumb").style.left = `${R + Math.cos(rad) * radius}px`;
+    $("thumb").style.top  = `${R + Math.sin(rad) * radius}px`;
+  }
+
+  /** Pointer on the wheel -> hue (angle) + saturation (radius). */
+  function pickFromWheel(ev) {
+    const wheel = $("wheel");
+    const rect = wheel.getBoundingClientRect();
+    const R = rect.width / 2;
+    const dx = ev.clientX - rect.left - R;
+    const dy = ev.clientY - rect.top - R;
+    let hue = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+    if (hue < 0) hue += 360;
+    const sat = Math.min(100, Math.round(Math.hypot(dx, dy) / (R - 9) * 100));
+    $("h").value = hue; $("s").value = sat;
+    syncColour();
+  }
+
+  (function bindWheel() {
+    const wheel = $("wheel");
+    let dragging = false;
+    const down = (e) => { dragging = true; wheel.setPointerCapture(e.pointerId); pickFromWheel(e); };
+    const move = (e) => { if (dragging) pickFromWheel(e); };
+    const up   = () => { dragging = false; };
+    wheel.addEventListener("pointerdown", down);
+    wheel.addEventListener("pointermove", move);
+    wheel.addEventListener("pointerup", up);
+    wheel.addEventListener("pointercancel", up);
+  })();
+
+  ["h", "s", "i"].forEach(id => $(id).addEventListener("input", syncColour));
+
+  // ---- CCT + brightness slider labels ------------------------------------
+  $("bri").addEventListener("input", e => $("bri-val").textContent = e.target.value);
+  $("cbri").addEventListener("input", e => $("cbri-val").textContent = e.target.value);
+  $("temp").addEventListener("input", e => $("temp-val").textContent = e.target.value * 100);
+  // GM is stored 0..100 (50 neutral) but shown to the user as -50..+50.
+  $("gm").addEventListener("input", e => $("gm-val").textContent = (e.target.value - 50));
+
+  // ---- flow opt labels ----------------------------------------------------
+  // Sliders are integers for feel; the engine wants small floats, so scale down.
+  const flowSpeed = () => (+$("flow-speed").value / 100).toFixed(2);
+  const flowSpread = () => (+$("flow-spread").value / 100).toFixed(2);
+  $("flow-speed").addEventListener("input", () => $("flow-speed-val").textContent = flowSpeed());
+  $("flow-spread").addEventListener("input", () => $("flow-spread-val").textContent = flowSpread());
+
+  // ---- actions ------------------------------------------------------------
+  $("power-on").onclick  = () => api(`/api/v1/${target()}/power`, { on: true });
+  $("power-off").onclick = () => api(`/api/v1/${target()}/power`, { on: false });
+  $("bri-send").onclick  = () => api(`/api/v1/${target()}/bri`, { bri: +$("bri").value });
+
+  $("hsi-send").onclick = () => api(`/api/v1/${target()}/hsi`,
+    { h: +$("h").value, s: +$("s").value, i: +$("i").value });
+
+  // temp slider is already in hundreds of K (32..85), matching the grammar.
+  $("cct-send").onclick = () => api(`/api/v1/${target()}/cct`,
+    { bri: +$("cbri").value, temp: +$("temp").value, gm: +$("gm").value });
+
+  $("scene-send").onclick = () => {
+    const effect = +$("scene-effect").value;
+    // Accept comma- or space-separated integer params; empty -> no params.
+    const params = $("scene-params").value.split(/[\s,]+/)
+      .filter(Boolean).map(Number).filter(n => Number.isFinite(n));
+    api(`/api/v1/${target()}/scene`, { effect, params });
+  };
+
+  $("flow-start").onclick = () => api(`/api/v1/flow/${$("flow-mode").value}`,
+    { args: [`speed=${flowSpeed()}`, `spread=${flowSpread()}`] });
+  $("flow-stop").onclick  = () => api(`/api/v1/stop`);
+
+  // ---- presets ------------------------------------------------------------
+  async function loadPresets() {
+    const box = $("presets");
+    try {
+      const res = await fetch("/api/v1/presets");
+      const presets = await res.json();
+      const names = Object.keys(presets);
+      box.innerHTML = "";
+      if (names.length === 0) {
+        box.innerHTML = '<span class="muted">none configured (see [presets] in neewerd.toml)</span>';
+        return;
+      }
+      for (const name of names) {
+        const btn = document.createElement("button");
+        btn.textContent = name;
+        btn.title = presets[name].join(" ; ");   // show the command lines on hover
+        btn.onclick = () => api(`/api/v1/preset/${encodeURIComponent(name)}`);
+        box.appendChild(btn);
+      }
+    } catch (err) {
+      box.innerHTML = '<span class="muted">could not load presets</span>';
+    }
+  }
+
+  // ---- boot ---------------------------------------------------------------
+  syncColour();
+  $("flow-speed-val").textContent = flowSpeed();
+  $("flow-spread-val").textContent = flowSpread();
+  pollOnce();        // paint immediately, even before the SSE stream opens
+  startLiveState();
+  loadPresets();
+  loadTargets();     // device-book groups/aliases for the target dropdown
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+name: CI
+
+# Lint + the hardware-free unit suite on every push/PR. The tests stub bleak
+# (tests/conftest.py) so no BLE stack is needed, but they DO import the `neewer`
+# library, so it must be installed.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Lint only — `ruff format` is deliberately not run (see pyproject rationale).
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The daemon depends on the `neewer` library (pinned in pyproject). Once it is
+      # published this is just `pip install .[test]`; until then, CI installs the
+      # sibling library repo checked out alongside this one:
+      #   - uses: actions/checkout@v4
+      #     with: { repository: <owner>/neewer-python, path: neewer-python }
+      #   - run: pip install ./neewer-python
+      - run: pip install neewer pytest
+      - run: python -m pytest

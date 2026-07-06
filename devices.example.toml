@@ -1,0 +1,60 @@
+# Shared device-identity config for neewerd and the neewer library.
+#
+# Copy to ~/.config/neewer/devices.toml (or set $NEEWER_DEVICES to point here).
+# Read by BOTH the daemon (neewerd) and the standalone root scripts
+# (ctl.py / pixel.py) so a nickname means the same thing everywhere.
+#
+#   cp devices.example.toml ~/.config/neewer/devices.toml
+#
+# All three sections are optional. Nicknames are case-insensitive; MACs are
+# stored upper-case. A missing file is fine (you just get no nicknames).
+
+[aliases]
+# nickname = "MAC"  — use the nickname anywhere a MAC is accepted.
+#   ctl.py probe key        (instead of ctl.py probe AA:BB:CC:DD:EE:01)
+#   ctl.py send  key main "78 81 01 01 fb"
+#   pixel.py     key 0 120 240
+key  = "AA:BB:CC:DD:EE:01"
+fill = "AA:BB:CC:DD:EE:02"
+back = "AA:BB:CC:DD:EE:03"
+
+[positions]
+# Physical left-to-right order for flows (t<N> targets in the daemon). Keys may
+# be aliases OR MACs. This is the same information as the daemon's
+# [core.positions]; put it here to share it with the root scripts. If you set
+# both, the daemon's [core.positions] wins per-MAC.
+fill = 1
+back = 2
+key  = 4
+
+[groups]
+# name = [members] — ordered and nestable. Members may be aliases, MACs, or
+# other group names. Address a group in the daemon by its name:
+#   neewerctl keys hsi 240 100 80      (both key and fill)
+# Built-in targets (all, t1, t2, ...) always win, so don't name a group "all".
+keys    = ["key", "fill"]
+all_rgb = ["keys", "back"]           # nested: expands to key, fill, back
+
+[models]
+# Declare each fixture's model (key may be an alias or a MAC) so the daemon can
+# gate per-model behaviour — e.g. it won't send the 0x88 scene to a TL120C (which
+# ignores it) or a pixel palette to a non-pixel fixture. Optional: an undeclared
+# tube's model is inferred from its firmware version, else treated as generic.
+# Known: TL120C, TL120C-2, TL90C, TL60 RGB-2, TL60 RGB-3.
+key  = "TL120C"
+fill = "TL90C"
+
+[units]
+# Map a fixture's &networkId unit-id (the advert "NW-<serial>&XXXXXXXX" suffix)
+# to a friendly display name. The networkId is a durable, self-documenting unit
+# id that survives BLE-MAC rotation (see docs/HARDWARE.md), so it's a stabler
+# anchor than a MAC. The console UI shows this label per light and sorts by it.
+# Keys are the 8-hex-digit networkId; "&"/"0x" prefixes and case are ignored.
+# Scheme in use: top 16 bits = model tag (90/120/60), low 16 = per-model number.
+"00900001" = "Key Left"      # TL90C  #1
+"00900002" = "Key Right"     # TL90C  #2
+"00900003" = "Fill"          # TL90C  #3
+"01200001" = "Back Wall"     # TL120C #1
+"01200002" = "Back Left"     # TL120C #2
+"01200003" = "Back Right"    # TL120C #3
+"00600001" = "Hair Light"    # TL60   #1

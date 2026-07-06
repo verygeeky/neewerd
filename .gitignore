@@ -1,0 +1,21 @@
+# The live config carries real MACs and broker credentials — never commit it.
+# Copy neewerd.example.toml to neewerd.toml and edit locally.
+neewerd.toml
+devices.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store

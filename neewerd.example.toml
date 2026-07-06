@@ -1,0 +1,144 @@
+# neewerd configuration. Copy to neewerd.toml and run:  python -m neewerd neewerd.toml
+log_level = "INFO"
+
+[core]
+# device-name prefixes to claim (Neewer app's own filter list)
+prefixes = ["NW-", "NWR", "NEEWER", "SL", "DL", "NH"]
+rescan_interval = 20.0
+# Half-open-link detection: when a connected tube hasn't sent a notify for this
+# many seconds, the supervisor sends a canary query; 3 consecutive silent probes
+# drop + reconnect the link (writes alone can't prove liveness). 0 disables.
+# liveness_interval = 30.0
+# Aliases and named groups live in the shared device book (also read by the root
+# scripts): ~/.config/neewer/devices.toml — see devices.example.toml. Point
+# elsewhere with `devices = "/path/to/devices.toml"` or $NEEWER_DEVICES.
+# devices = "~/.config/neewer/devices.toml"
+
+# physical left-to-right order for flows (MAC -> position). Optional; overrides
+# the [positions] in the shared device book per-MAC.
+[core.positions]
+"AA:BB:CC:DD:EE:02" = 1
+"AA:BB:CC:DD:EE:03" = 2
+"AA:BB:CC:DD:EE:04" = 3
+"AA:BB:CC:DD:EE:01" = 4   # the TL120C
+
+# ---- Presets: name -> ordered list of command lines ----------------------
+# Run one with `preset <name>` on any transport (socket/mqtt/osc/http), e.g.
+# `neewerctl preset recording`, or POST /api/v1/preset/recording. Each line is a
+# normal command, so a preset can span targets/groups and even start an effect.
+# GET /api/v1/presets lists them. A preset may target a group/alias from the
+# shared device book (see devices.example.toml).
+[presets]
+recording = ["all cct 90 48 50"]
+blue-wash = ["all hsi 240 100 60"]
+off       = ["all power off"]
+# key-warm  = ["key cct 40 32 50", "fill cct 40 32 50"]   # needs aliases in the book
+# party     = ["all flow palette speed=0.05"]             # presets can start effects
+
+# ---- I/O modules: enable the ones you want -------------------------------
+
+[modules.socket]
+enabled = true
+# Leave `path` unset to auto-resolve: $NEEWERD_SOCKET, else
+# $XDG_RUNTIME_DIR/neewerd.sock (user service), else /run/neewerd/neewerd.sock
+# (system service w/ RuntimeDirectory), else /tmp/neewerd.sock. neewerctl uses
+# the same resolution. Set it explicitly only to override.
+# path = "/run/neewerd/neewerd.sock"
+
+[modules.mqtt]            # neewer2mqtt + Home Assistant MQTT Discovery
+enabled = false
+host = "localhost"       # broker host — prefer a DNS name over a literal IP
+port = 1883
+base_topic = "neewer"    # entity + legacy command/state topics live under here
+# username = ""          # NEVER commit a real password here; keep neewerd.toml
+# password = ""          # gitignored, or pass creds via the environment
+state_interval = 5.0     # reconcile / state-publish cadence (state is sent on change)
+# --- Home Assistant MQTT Discovery ---
+discovery = true         # publish homeassistant/light/<id>/config for each tube+group+all
+discovery_prefix = "homeassistant"
+node_id = "neewer"       # object_id prefix: neewer_<mac> / neewer_all / neewer_group_<name>
+color_temp_unit = "kelvin"   # "kelvin" (HA 2023.10+) or "mireds" (older HA)
+legacy_topics = true     # also keep neewer/cmd (in) + neewer/state (out) for back-compat
+query_interval = 120.0   # poll tubes for battery/power/firmware (diagnostic sensors); 0 = on connect only
+
+[modules.osc]            # osc2neewer
+enabled = false
+host = "127.0.0.1"      # loopback default (no auth); set 0.0.0.0 only for LAN use
+port = 9000             # /neewer/all/hsi 240 100 80
+
+[modules.http]
+enabled = false
+host = "127.0.0.1"     # loopback default — no auth/TLS; set 0.0.0.0 only for deliberate LAN exposure
+port = 8099            # REST:   POST /api/v1/all/hsi {"h":240,"s":100,"i":80} ; GET /api/v1/state
+                       # legacy: POST /cmd 'all hsi 240 100 80' ; web UI at http://<host>:8099/
+                       # The MCP server (neewer-mcp) is an external client of this layer — enable
+                       # this module (bind 127.0.0.1) to use it. See docs/MCP.md.
+
+[modules.artnet]        # drive the tubes from an Art-Net (DMX-over-IP) console
+enabled = false
+host = "0.0.0.0"        # 0.0.0.0 so broadcast Art-Net is received
+port = 6454
+send_hz = 30.0          # send-loop tick rate (BLE writes only on change)
+min_interval = 0.04     # per-tube floor between writes (~25 Hz)
+# send_hz / min_interval throttle BLE writes; heavier personalities (rgbw) want a
+# larger min_interval on a busy multi-fixture rig.
+#
+# Per-tube adaptive write control (#46) — a BBR-style governor keeps each tube's
+# issue rate at-or-below its *measured* BLE delivery rate (drop-newest: an
+# over-paced tube skips a tick, never queues; no more minutes-long BlueZ TX
+# backlogs). Fully AUTO-TUNING with zero config; the optional knobs below (the
+# sacn module takes the same ones) only pin the bounds. `canary_interval` is the
+# per-tube query->notify RTT probe feeding the congestion signal (0 = off).
+# rate_min = 1.0            # writes/s floor per tube
+# rate_max = 80.0           # writes/s ceiling per tube
+# probe_interval = 4.0      # s between +15% rate probes (ProbeBW)
+# probe_rtt_interval = 10.0 # s between brief quiesces re-baselining RTT (ProbeRTT)
+# increase_factor = 1.15    # ProbeBW step multiplier
+# rtt_congestion_k = 2.0    # canary rtt > min_rtt * K counts as congestion
+# canary_interval = 2.0     # s between per-tube RTT canaries (artnet only; 0 = off)
+#
+# Patch table: key is any resolve() target (t<N> / MAC / alias / group). Each
+# fixture is one pixel: a universe + 1-based start address + personality.
+# Personalities and their channel footprints:
+#   hsi  (4 ch: hue-MSB, hue-LSB, saturation, intensity)
+#   cct  (3 ch: intensity, temperature, green/magenta)
+#   rgb  (3 ch: R, G, B)                    — for RGB sources such as LedFx
+#   rgbw (4 ch: R, G, B, W)                 — drives the dedicated cold/warm white
+#
+# Space each fixture's `address` by its personality's channel count (its
+# footprint): hsi and rgbw are 4 channels, cct and rgb are 3. Example — three
+# `rgb` fixtures packed back-to-back start at address 1, 4, 7:
+#   [modules.artnet.patch.t1]   universe = 0  address = 1  personality = "rgb"
+#   [modules.artnet.patch.t2]   universe = 0  address = 4  personality = "rgb"
+#   [modules.artnet.patch.t3]   universe = 0  address = 7  personality = "rgb"
+#
+# LedFx note: set the LedFx device's white channel OFF for rgb / hsi (3 bytes per
+# pixel) and ON ("Accurate") for rgbw (4 bytes per pixel), so the wire stride
+# matches your patch spacing.
+[modules.artnet.patch.t1]
+universe = 0
+address = 1
+personality = "hsi"
+# ["modules.artnet.patch.AA:BB:CC:DD:EE:01"]   # or a specific MAC / an alias / a group
+# universe = 0
+# address = 5
+# personality = "cct"
+
+[modules.sacn]          # drive the tubes from an sACN / E1.31 (DMX-over-IP) console
+enabled = false         # needs the optional `sacn` extra: pip install '.[sacn]'
+host = "0.0.0.0"        # bind address for the E1.31 receiver (UDP 5568)
+port = 5568             # sACN standard port
+send_hz = 30.0          # send-loop tick rate (BLE writes only on change)
+min_interval = 0.04     # per-tube floor between writes (~25 Hz)
+data_loss_hold = true   # on stream-terminated / network timeout: hold last look
+                        # (false = blackout the universe). The `sacn` lib already
+                        # drops out-of-order sequences and lets the highest-priority
+                        # source win; it joins multicast 239.255.<hi>.<lo> per universe.
+# Patch table: same shape as [modules.artnet] — key is any resolve() target
+# (t<N> / MAC / alias / group); universe + 1-based address + personality
+# (hsi / cct / rgb / rgbw). Space each address by the personality's channel
+# footprint (hsi & rgbw = 4 ch, cct & rgb = 3 ch).
+[modules.sacn.patch.t1]
+universe = 1
+address = 1
+personality = "hsi"

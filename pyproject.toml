@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neewerd"
+version = "0.1.0"
+description = "Thin BLE control daemon for Neewer TL90C/Infinity lights — pluggable I/O modules over the neewer library"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Bengt-Erik Norum", email = "bengt@bengt.org" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: System :: Hardware",
+]
+# The byte-wise protocol, the Fleet BLE client, effects, the device book and
+# bluez self-heal all live in the `neewer` library now — the daemon just wires
+# I/O modules onto it. Pinned to the 0.x line it was built against (the library is
+# pre-1.0, so a minor bump may change the API); locally satisfied by an editable install.
+dependencies = ["neewer>=0.1.0,<0.2.0"]
+
+[project.optional-dependencies]
+mqtt = ["aiomqtt>=2.5.1"]      # modules.mqtt  (neewer2mqtt)
+osc = ["python-osc>=1.10.2"]   # modules.osc   (osc2neewer)
+sacn = ["sacn>=1.11.0"]        # modules.sacn  (sacn2neewer) — E1.31 receiver
+mcp = ["mcp>=1.20"]            # mcp_server (neewer-mcp) — stdio MCP server, daemon client
+all = ["aiomqtt>=2.5.1", "python-osc>=1.10.2", "sacn>=1.11.0", "mcp>=1.20"]
+test = ["pytest>=9.1.1"]       # hardware-free unit-test suite
+dev = ["pytest>=9.1.1", "ruff>=0.15", "pre-commit>=4"]  # lint + test tooling
+
+[project.scripts]
+neewerd = "neewerd.__main__:cli"
+neewerctl = "neewerd.cli:main"      # thin client of the daemon command socket
+neewer-mcp = "neewerd.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/verygeeky/neewerd"
+Documentation = "https://github.com/verygeeky/neewer-hardware"
+Issues = "https://github.com/verygeeky/neewerd/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["neewerd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# bleak is stubbed in tests/conftest.py, so the suite runs with no BLE stack.
+markers = [
+    # Live tests hit a running daemon + real lights; skipped unless NEEWER_LIVE=1.
+    # Dry run:  pytest         Live run:  NEEWER_LIVE=1 pytest -m live
+    "live: requires a running neewerd daemon and real hardware (set NEEWER_LIVE=1)",
+]
+
+[tool.ruff]
+# 100 cols matches the codebase's existing hand-wrapped width. We lint only —
+# `ruff format` is deliberately NOT run: it collapses column-aligned magic-byte
+# comments and re-cases verbatim observed opcode bytes, both of which are
+# load-bearing.
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes (unused/undefined), I import-sorting. A deliberately
+# conservative set — it enforces the "readable PEP8-ish, no dead imports" rule.
+select = ["E", "F", "W", "I"]

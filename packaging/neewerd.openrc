@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# OpenRC init script for neewerd (non-systemd systems / Artix / Gentoo / Alpine).
+# Install:
+#   sudo cp packaging/neewerd.openrc /etc/init.d/neewerd
+#   sudo chmod +x /etc/init.d/neewerd
+#   sudo cp neewerd.example.toml /etc/neewerd/neewerd.toml   # then edit
+#   sudo rc-update add neewerd default
+#   sudo rc-service neewerd start
+
+name="neewerd"
+description="Neewer TL90C/Infinity light BLE control daemon"
+
+: "${neewerd_user:=root}"
+: "${neewerd_config:=/etc/neewerd/neewerd.toml}"
+: "${neewerd_exec:=/usr/bin/neewerd}"
+
+command="${neewerd_exec}"
+command_user="${neewerd_user}"
+command_background=true
+pidfile="/run/${name}.pid"
+output_log="/var/log/${name}.log"
+error_log="/var/log/${name}.log"
+export NEEWERD_CONFIG="${neewerd_config}"
+
+depend() {
+    need bluetooth dbus
+    after net
+}

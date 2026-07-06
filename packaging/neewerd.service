@@ -1,0 +1,41 @@
+# systemd system service for neewerd.
+# Install:
+#   sudo cp packaging/neewerd.service /etc/systemd/system/
+#   sudo mkdir -p /etc/neewerd && sudo cp neewerd.example.toml /etc/neewerd/neewerd.toml
+#   # edit User=, ExecStart=, and /etc/neewerd/neewerd.toml to taste
+#   sudo systemctl daemon-reload && sudo systemctl enable --now neewerd
+#
+# BLE note: neewerd talks to BlueZ over the system DBus. The User= below must be
+# allowed to use org.bluez (root works; a normal desktop user usually works via
+# polkit; otherwise add a polkit rule or run as root). If connections silently
+# fail, that's almost always a DBus/polkit permission issue — try User=root first.
+
+[Unit]
+Description=neewerd - Neewer TL90C/Infinity light BLE control daemon
+Documentation=https://github.com/verygeeky/neewerd
+After=bluetooth.target network-online.target
+Wants=bluetooth.target network-online.target
+
+[Service]
+Type=simple
+User=youruser
+# Point at your install. Either an installed console script:
+#   ExecStart=/usr/bin/neewerd
+# or run the module from a venv:
+ExecStart=/opt/neewerd/venv/bin/python -m neewerd
+Environment=NEEWERD_CONFIG=/etc/neewerd/neewerd.toml
+Restart=on-failure
+RestartSec=5
+
+# Creates and owns /run/neewerd (cleaned up on stop). The socket module's default
+# path resolves here for a system service, so neewerctl finds it automatically.
+RuntimeDirectory=neewerd
+
+# Light hardening — relax any of these if they interfere with BlueZ/DBus.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/tmp /run
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

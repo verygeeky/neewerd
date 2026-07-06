@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<!--
+  neewerd web UI — a single self-contained proof-of-concept page.
+
+  Talks to the daemon's HTTP module over the structured /api/v1 layer:
+    GET  /api/v1/state              -> tube snapshot
+    POST /api/v1/<target>/power     {"on": bool}
+    POST /api/v1/<target>/hsi       {"h","s","i"}
+    POST /api/v1/<target>/cct       {"bri","temp","gm"}
+    POST /api/v1/flow/<mode>        start a running effect
+    POST /api/v1/stop               cancel any running effect
+    GET  /api/v1/presets            -> configured presets (names -> command lines)
+    POST /api/v1/preset/<name>      run a named preset
+
+  It is served same-origin by http.py (GET / and GET /ui), so there is no CORS
+  problem. Vanilla HTML/CSS/JS, no build step, no dependencies.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>neewerd</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0; padding: 1.5rem;
+      background: #14151a; color: #e7e7ea;
+      max-width: 720px; margin-inline: auto;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 1rem; }
+    h2 { font-size: 1rem; margin: 0 0 .75rem; color: #b9b9c2; }
+    section {
+      background: #1d1e26; border: 1px solid #2c2e3a; border-radius: 10px;
+      padding: 1rem; margin-bottom: 1rem;
+    }
+    label { display: block; font-size: .85rem; margin: .5rem 0 .15rem; color: #b9b9c2; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    input[type=range] { flex: 1; min-width: 160px; }
+    .val { font-variant-numeric: tabular-nums; width: 4rem; text-align: right; color: #e7e7ea; }
+    button, select {
+      font: inherit; background: #2c2e3a; color: #e7e7ea;
+      border: 1px solid #3a3c4a; border-radius: 7px; padding: .4rem .8rem; cursor: pointer;
+    }
+    button:hover, select:hover { background: #353746; }
+    button:active { transform: translateY(1px); }
+    .swatch {
+      width: 100%; height: 48px; border-radius: 7px; border: 1px solid #3a3c4a;
+      margin-top: .5rem;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #2c2e3a; }
+    th { color: #8a8a96; font-weight: 600; }
+    .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; }
+    .on { background: #46d160; } .off { background: #d14646; }
+    #status {
+      position: sticky; bottom: 0; margin-top: 1rem;
+      padding: .6rem .8rem; border-radius: 7px; font-size: .9rem;
+      background: #1d1e26; border: 1px solid #2c2e3a; min-height: 1.2rem;
+    }
+    #status.ok { border-color: #2e6b3a; } #status.err { border-color: #6b2e2e; }
+    .muted { color: #8a8a96; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>neewerd &mdash; tube control</h1>
+
+  <section>
+    <div class="row" style="justify-content: space-between">
+      <h2 style="margin:0">State</h2>
+      <div class="row">
+        <label style="margin:0"><input type="checkbox" id="poll"> auto-refresh</label>
+        <button id="refresh">Refresh</button>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>conn</th><th>target</th><th>name</th><th>pos</th><th>last command</th></tr></thead>
+      <tbody id="state-rows"><tr><td colspan="5" class="muted">loading&hellip;</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Target</h2>
+    <div class="row">
+      <select id="target"><option value="all">all</option></select>
+      <span class="muted">power / HSI / CCT apply to this target; flow &amp; stop are global</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Power</h2>
+    <div class="row">
+      <button id="power-on">On</button>
+      <button id="power-off">Off</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>HSI colour</h2>
+    <div class="row">
+      <label style="margin:0">pick</label>
+      <input type="color" id="hsi-picker" value="#0000ff">
+    </div>
+    <label>Hue <span class="val" id="h-val">240</span>&deg;</label>
+    <input type="range" id="h" min="0" max="360" value="240">
+    <label>Saturation <span class="val" id="s-val">100</span>%</label>
+    <input type="range" id="s" min="0" max="100" value="100">
+    <label>Intensity <span class="val" id="i-val">80</span>%</label>
+    <input type="range" id="i" min="0" max="100" value="80">
+    <div class="swatch" id="hsi-swatch"></div>
+    <div class="row" style="margin-top:.6rem"><button id="hsi-send">Apply HSI</button></div>
+  </section>
+
+  <section>
+    <h2>CCT (white)</h2>
+    <label>Brightness <span class="val" id="cbri-val">50</span>%</label>
+    <input type="range" id="cbri" min="0" max="100" value="50">
+    <!-- temp is sent in hundreds of Kelvin (frames.py CCT_MIN=32..CCT_MAX=85). -->
+    <label>Temperature <span class="val" id="temp-val">5600</span> K</label>
+    <input type="range" id="temp" min="32" max="85" value="56">
+    <!-- green/magenta tint: 0..100, 50 neutral (frames.GM_NEUTRAL). -->
+    <label>G/M tint <span class="val" id="gm-val">50</span></label>
+    <input type="range" id="gm" min="0" max="100" value="50">
+    <div class="row" style="margin-top:.6rem"><button id="cct-send">Apply CCT</button></div>
+  </section>
+
+  <section>
+    <h2>Flow effect <span class="muted">(global)</span></h2>
+    <div class="row">
+      <select id="flow-mode">
+        <option value="hue">hue</option>
+        <option value="comet">comet</option>
+        <option value="palette" selected>palette</option>
+        <option value="tri">tri</option>
+        <option value="multistop">multistop</option>
+      </select>
+      <button id="flow-start">Start flow</button>
+      <button id="flow-stop">Stop</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Presets <span class="muted">(global)</span></h2>
+    <div class="row" id="preset-buttons"><span class="muted">loading&hellip;</span></div>
+  </section>
+
+  <div id="status" class="muted">ready</div>
+
+  <script>
+    // ---- tiny helpers ----------------------------------------------------
+    const $ = (id) => document.getElementById(id);
+
+    /** Show the API outcome on the sticky status line. */
+    function report(status, body) {
+      const el = $("status");
+      const ok = status >= 200 && status < 300;
+      // The /api/v1 layer wraps replies as {"result":...} / {"error":...}.
+      const msg = (body && (body.result ?? body.error)) ?? JSON.stringify(body);
+      el.textContent = `${status} — ${msg}`;
+      el.className = ok ? "ok" : "err";
+    }
+
+    /** POST JSON to an /api/v1 path and surface the result. */
+    async function api(path, payload) {
+      try {
+        const opts = { method: "POST" };
+        if (payload !== undefined) opts.body = JSON.stringify(payload);
+        const res = await fetch(path, opts);
+        const body = await res.json().catch(() => ({}));
+        report(res.status, body);
+        // A successful command may have changed visible state.
+        if (res.ok) refresh();
+        return res.ok;
+      } catch (err) {
+        report(0, { error: `network error: ${err}` });
+        return false;
+      }
+    }
+
+    const target = () => $("target").value;
+
+    // ---- state view ------------------------------------------------------
+    async function refresh() {
+      try {
+        const res = await fetch("/api/v1/state");
+        const snap = await res.json();
+        renderState(snap);
+      } catch (err) {
+        report(0, { error: `cannot read state: ${err}` });
+      }
+    }
+
+    function renderState(snap) {
+      const rows = $("state-rows");
+      const entries = Object.entries(snap);
+      rows.innerHTML = "";
+      if (entries.length === 0) {
+        rows.innerHTML = '<tr><td colspan="5" class="muted">no tubes known</td></tr>';
+      }
+      // Remember the current selection so a refresh doesn't reset the dropdown.
+      const keep = target();
+      const opts = ['<option value="all">all</option>'];
+      for (const [mac, t] of entries) {
+        // A tube is addressable by physical position (t<N>) when it has one,
+        // otherwise only by MAC.
+        const tgt = (t.pos != null) ? `t${t.pos}` : mac;
+        opts.push(`<option value="${tgt}">${tgt} — ${t.name ?? mac}</option>`);
+        const dot = t.connected ? "on" : "off";
+        rows.insertAdjacentHTML("beforeend",
+          `<tr><td><span class="dot ${dot}"></span></td>` +
+          `<td>${tgt}</td><td>${t.name ?? ""}</td><td>${t.pos ?? ""}</td>` +
+          `<td class="muted">${t.last ?? ""}</td></tr>`);
+      }
+      const sel = $("target");
+      sel.innerHTML = opts.join("");
+      sel.value = [...sel.options].some(o => o.value === keep) ? keep : "all";
+    }
+
+    // ---- HSI <-> colour-picker sync -------------------------------------
+    function hsiToRgb(h, s, i) {
+      s /= 100; i /= 100;
+      const c = (1 - Math.abs(2 * i - 1)) * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = i - c / 2;
+      const [r, g, b] = (
+        h < 60  ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] :
+        h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x]);
+      const hex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+      return `#${hex(r)}${hex(g)}${hex(b)}`;
+    }
+
+    function rgbToHs(hex) {
+      const r = parseInt(hex.slice(1, 3), 16) / 255;
+      const g = parseInt(hex.slice(3, 5), 16) / 255;
+      const b = parseInt(hex.slice(5, 7), 16) / 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+      let h = 0;
+      if (d !== 0) {
+        if (max === r) h = ((g - b) / d) % 6;
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+      }
+      h = Math.round(h * 60); if (h < 0) h += 360;
+      const l = (max + min) / 2;
+      const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+      return { h, s: Math.round(s * 100) };
+    }
+
+    function updateHsiSwatch() {
+      const h = +$("h").value, s = +$("s").value, i = +$("i").value;
+      $("h-val").textContent = h; $("s-val").textContent = s; $("i-val").textContent = i;
+      $("hsi-swatch").style.background = hsiToRgb(h, s, i);
+      $("hsi-picker").value = hsiToRgb(h, s, 50);   // picker shows hue/sat at mid lightness
+    }
+
+    ["h", "s", "i"].forEach(id => $(id).addEventListener("input", updateHsiSwatch));
+    $("hsi-picker").addEventListener("input", (e) => {
+      const { h, s } = rgbToHs(e.target.value);
+      $("h").value = h; $("s").value = s;
+      updateHsiSwatch();
+    });
+
+    // ---- CCT slider labels ----------------------------------------------
+    $("cbri").addEventListener("input", e => $("cbri-val").textContent = e.target.value);
+    $("temp").addEventListener("input", e => $("temp-val").textContent = e.target.value * 100);
+    $("gm").addEventListener("input", e => $("gm-val").textContent = e.target.value);
+
+    // ---- actions ---------------------------------------------------------
+    $("power-on").onclick  = () => api(`/api/v1/${target()}/power`, { on: true });
+    $("power-off").onclick = () => api(`/api/v1/${target()}/power`, { on: false });
+
+    $("hsi-send").onclick = () => api(`/api/v1/${target()}/hsi`,
+      { h: +$("h").value, s: +$("s").value, i: +$("i").value });
+
+    // temp slider is in hundreds of K already (32..85), matching the grammar.
+    $("cct-send").onclick = () => api(`/api/v1/${target()}/cct`,
+      { bri: +$("cbri").value, temp: +$("temp").value, gm: +$("gm").value });
+
+    $("flow-start").onclick = () => api(`/api/v1/flow/${$("flow-mode").value}`);
+    $("flow-stop").onclick  = () => api(`/api/v1/stop`);
+
+    // ---- presets ---------------------------------------------------------
+    // Discover presets from the daemon and render one button each. A click POSTs
+    // /api/v1/preset/<name> (bodiless), reusing the same api() plumbing.
+    async function loadPresets() {
+      const box = $("preset-buttons");
+      try {
+        const res = await fetch("/api/v1/presets");
+        const presets = await res.json();
+        const names = Object.keys(presets);
+        box.innerHTML = "";
+        if (names.length === 0) {
+          box.innerHTML = '<span class="muted">none configured (see [presets] in neewerd.toml)</span>';
+          return;
+        }
+        for (const name of names) {
+          const btn = document.createElement("button");
+          btn.textContent = name;
+          btn.title = presets[name].join(" ; ");   // show the command lines on hover
+          btn.onclick = () => api(`/api/v1/preset/${encodeURIComponent(name)}`);
+          box.appendChild(btn);
+        }
+      } catch (err) {
+        box.innerHTML = '<span class="muted">could not load presets</span>';
+      }
+    }
+
+    $("refresh").onclick = refresh;
+
+    // Optional light polling, off by default.
+    let pollTimer = null;
+    $("poll").addEventListener("change", (e) => {
+      clearInterval(pollTimer);
+      if (e.target.checked) pollTimer = setInterval(refresh, 3000);
+    });
+
+    // ---- boot ------------------------------------------------------------
+    updateHsiSwatch();
+    refresh();
+    loadPresets();
+  </script>
+</body>
+</html>
