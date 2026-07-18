@@ -76,4 +76,36 @@ uv venv .venv
 [neewer-python](https://github.com/verygeeky/neewer-python) to develop both at
 once: `.venv/bin/pip install -e ../neewer-python -e '.[all]'`.)
 
+### Windows
+
+Installation works on Windows with the same steps. The daemon runs successfully
+and communicates with Neewer lights via Bluetooth LE through the `bleak` library's
+WinRT backend.
+
+**Windows-specific notes:**
+
+1. **Console scripts PATH**: After `pip install`, the scripts (`neewerd`,
+   `neewerctl`, `neewer-mcp`) are installed to
+   `%APPDATA%\Python\Python3XX\Scripts`. If this directory is not on your PATH,
+   either add it or run the daemon via the module:
+   ```
+   python -m neewerd [config.toml]
+   python -m neewerd --help
+   ```
+
+2. **Runtime signal handlers**: The Unix signals `SIGUSR1`, `SIGUSR2`, and
+   `SIGHUP` (for toggling log levels and hot-reloading config) are not available
+   on Windows. These features are gracefully disabled on Windows. To change log
+   levels or reload config on Windows, restart the daemon or use the HTTP API if
+   the `http` module is enabled.
+
+3. **Config file location**: The default config search path includes
+   `./neewerd.toml` (current directory) and checks the `NEEWERD_CONFIG`
+   environment variable. The `/etc/neewerd/neewerd.toml` path is Unix-specific
+   and won't be checked on Windows.
+
+4. **Example config**: Copy `neewerd.example.toml` to `neewerd.toml` and enable
+   the modules you want (at minimum, enable `[modules.socket]` or
+   `[modules.http]` for control access).
+
 See [`CHANGELOG.md`](CHANGELOG.md) for notable changes.

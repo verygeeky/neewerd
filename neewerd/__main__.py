@@ -215,14 +215,18 @@ def reload_config(core, config_path: str | None, log: logging.Logger) -> None:
 def _install_runtime_signal_handlers(loop, core, config_path: str | None,
                                      configured_level: int, log: logging.Logger) -> None:
     """Wire the tune-without-restart signals (#45): SIGUSR1/2 log level, SIGHUP reload."""
-    handlers = (
-        (signal.SIGUSR1, lambda: toggle_debug(configured_level, log)),
-        (signal.SIGUSR2, lambda: reset_log_level(configured_level, log)),
-        (signal.SIGHUP, lambda: reload_config(core, config_path, log)),
-    )
+    # On Windows, SIGUSR1/SIGUSR2/SIGHUP don't exist, so skip signal setup entirely
+    handlers = []
+    with contextlib.suppress(AttributeError):
+        handlers.append((signal.SIGUSR1, lambda: toggle_debug(configured_level, log)))
+    with contextlib.suppress(AttributeError):
+        handlers.append((signal.SIGUSR2, lambda: reset_log_level(configured_level, log)))
+    with contextlib.suppress(AttributeError):
+        handlers.append((signal.SIGHUP, lambda: reload_config(core, config_path, log)))
+
     for sig, handler in handlers:
-        with contextlib.suppress(NotImplementedError, ValueError, AttributeError):
-            loop.add_signal_handler(sig, handler)      # AttributeError: no SIGUSR* on Windows
+        with contextlib.suppress(NotImplementedError, ValueError):
+            loop.add_signal_handler(sig, handler)
 
 
 async def shutdown(tasks, core, log, timeout: float = SHUTDOWN_TIMEOUT) -> None:
@@ -289,7 +293,26 @@ async def main(cfg: dict, config_path: str | None = None) -> None:
 
 def cli() -> None:
     """Console-script entry point (see ``[project.scripts]`` in pyproject)."""
-    path = resolve_config_path(sys.argv)
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="neewerd",
+        description="Neewer TL-series RGB tube light control daemon",
+        epilog="See https://github.com/verygeeky/neewerd for documentation",
+    )
+    parser.add_argument(
+        "config",
+        nargs="?",
+        help="path to config file (default: neewerd.toml, /etc/neewerd/neewerd.toml, or $NEEWERD_CONFIG)",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="neewerd 0.1.0",
+    )
+    args = parser.parse_args()
+
+    # Use the provided config path, or fall back to resolve_config_path logic
+    path = args.config if args.config else resolve_config_path(sys.argv)
     try:
         asyncio.run(main(load_config(path), config_path=path))
     except KeyboardInterrupt:
