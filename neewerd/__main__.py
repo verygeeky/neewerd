@@ -307,7 +307,7 @@ def cli() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="neewerd 0.1.0",
+        version="neewerd 0.1.1",
     )
     args = parser.parse_args()
 
