@@ -302,7 +302,10 @@ def cli() -> None:
     parser.add_argument(
         "config",
         nargs="?",
-        help="path to config file (default: neewerd.toml, /etc/neewerd/neewerd.toml, or $NEEWERD_CONFIG)",
+        help=(
+            "path to config file (default: neewerd.toml, "
+            "/etc/neewerd/neewerd.toml, or $NEEWERD_CONFIG)"
+        ),
     )
     parser.add_argument(
         "--version",
