@@ -142,3 +142,43 @@ data_loss_hold = true   # on stream-terminated / network timeout: hold last look
 universe = 1
 address = 1
 personality = "hsi"
+
+[modules.artnet_bridge]  # Art-Net in -> Art-Net out: wrap a plain pixel stream in the
+                         # TL120C 32-pixel-custom personality and send it to an Art-Net
+                         # (DMX-over-IP) node that feeds the tubes over wired DMX512.
+                         # Unlike [modules.artnet], this never touches BLE.
+enabled = false
+listen_host = "0.0.0.0"  # receive the source's simple pixel stream (all interfaces)
+listen_port = 6454
+dest = "192.0.2.10"      # the Art-Net node's IP (unicast; our output never loops back)
+dest_port = 6454
+fps = 44.0               # output refresh rate; 44 Hz is a full DMX universe's ceiling
+personality = "rgb"      # default INPUT stride/px: rgb=3ch rgbw=4ch rgbcw/rgbaw/rgbwa=5ch
+pixels = 32              # default pixels per tube (TL120C = 32)
+# The OUTPUT is always the tube's per-pixel RGBCW (colour-mode, brightness, R, G, B,
+# cold-white, warm-white; 2 + 32*7 = 226 channels/tube, so two tubes fit one output
+# universe at addresses 1 and 227). Only the input stride changes with `personality`:
+# rgb leaves both whites off; rgbw drives cold=warm from one white channel (a neutral
+# white); rgbcw passes cold and warm through separately; rgbaw [R,G,B,A,W] / rgbwa
+# [R,G,B,W,A] map a console fixture's white->cold and amber->warm (approximate CCT).
+# personality/pixels may also be set per tube (below) to override these defaults, so
+# one rig can mix formats or bin-pack tubes; a slice past ch 512 fails at startup.
+# See examples/ for uni-per-tube (rgbaw) and bin-packed (rgbw) configs.
+#
+# Source: one strip of N*32 pixels, 3 B/px for rgb or 4 B/px for rgbw; the wire stride
+# must match `personality`. Art-Net universe numbers are 0-based on the wire.
+#
+# Patch table: one entry per tube maps an input slice to an output slice. `in_*` is
+# where the source places that tube's pixels; `out_*` is the TL120C block on the node.
+# Space `out_address` by 226 to pack two tubes into one output universe. A tube may add
+# its own `personality`/`pixels` to override the module defaults above.
+[modules.artnet_bridge.tube.tube1]
+in_universe = 0
+in_address = 1
+out_universe = 0
+out_address = 1
+[modules.artnet_bridge.tube.tube2]
+in_universe = 0
+in_address = 97      # tube1 uses input ch 1..96 (32 px * 3 ch); tube2's pixels start here
+out_universe = 0
+out_address = 227

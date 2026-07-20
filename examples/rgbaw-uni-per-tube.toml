@@ -1,0 +1,58 @@
+# artnet_bridge example: RGBAW front-end, one Art-Net universe per tube.
+#
+# Front-end universes are cheap, so give each tube its own. It is simple to reason about,
+# easy to extend (the next tube is the next universe), and leaves headroom on every universe.
+#
+#   pixel source (4 universes, 32 px RGBAW each)  -> [Art-Net] ->  artnet_bridge
+#     -> [Art-Net, tube personality] ->  DMX-over-IP node  -> [DMX512] ->  tubes
+#
+# personality "rgbaw" is 5 ch/px in source order [R, G, B, Amber, White]. The bridge sends
+# White to cold-white and Amber to warm-white (amber is the warm primary), which gives
+# approximate colour-temperature control from a stock RGBAW console fixture. Use "rgbwa" if
+# your fixture emits [R, G, B, W, A] instead. Same result, only the source channel order differs.
+#
+# Front-end patch: one 32-pixel RGBAW fixture per universe, stride 5, first pixel at ch 1.
+#   universe 0 -> tube 1   pixels at ch 1, 6, 11 ... 156
+#   universe 1 -> tube 2
+#   universe 2 -> tube 3
+#   universe 3 -> tube 4
+
+log_level = "INFO"
+
+[core]
+prefixes = []                 # pure Art-Net bridge, no BLE tubes claimed
+
+[modules.artnet_bridge]
+enabled = true
+listen_host = "0.0.0.0"
+listen_port = 6454
+dest = "192.0.2.10"           # your Art-Net / DMX-over-IP node
+dest_port = 6454
+fps = 44.0
+personality = "rgbaw"         # module default. Each tube inherits it unless it sets its own.
+pixels = 32
+
+# out_universe/out_address are the node side: two tubes per output universe, at ch 1 and 227.
+[modules.artnet_bridge.tube.t1]
+in_universe = 0
+in_address = 1
+out_universe = 0
+out_address = 1
+
+[modules.artnet_bridge.tube.t2]
+in_universe = 1
+in_address = 1
+out_universe = 0
+out_address = 227
+
+[modules.artnet_bridge.tube.t3]
+in_universe = 2
+in_address = 1
+out_universe = 1
+out_address = 1
+
+[modules.artnet_bridge.tube.t4]
+in_universe = 3
+in_address = 1
+out_universe = 1
+out_address = 227

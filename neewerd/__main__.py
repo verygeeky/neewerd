@@ -39,7 +39,7 @@ _KNOWN_TOP = {"core", "modules", "presets", "log_level"}
 _KNOWN_CORE = {"prefixes", "positions", "rescan_interval", "devices", "liveness_interval"}
 #: I/O modules the daemon ships; a ``[modules.<name>]`` under any other name won't
 #: import (:func:`start_modules` would log an ImportError), so flag it up front.
-_KNOWN_MODULES = {"socket", "http", "mqtt", "osc", "sacn", "artnet"}
+_KNOWN_MODULES = {"socket", "http", "mqtt", "osc", "sacn", "artnet", "artnet_bridge"}
 
 
 def validate_config(cfg: dict) -> list[str]:

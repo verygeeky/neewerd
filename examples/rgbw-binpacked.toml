@@ -1,0 +1,58 @@
+# artnet_bridge example: RGBW front-end, four tubes bin-packed into one universe.
+#
+# When you would rather not spend a universe per tube, pack them. RGBW is 4 ch/px, so a
+# 32-pixel tube is 128 channels and four tubes fit one 512-channel universe exactly, at
+# 1, 129, 257, 385. The whole rig rides a single front-end universe.
+#
+#   pixel source (1 universe, 4x32 px RGBW)  -> [Art-Net] ->  artnet_bridge
+#     -> [Art-Net, tube personality] ->  DMX-over-IP node  -> [DMX512] ->  tubes
+#
+# personality "rgbw" is 4 ch/px [R, G, B, W]. The single white drives both tube emitters
+# (cold = warm = W, a neutral white). This is a stock RGBW fixture with no remapping.
+#
+# Front-end patch (all on universe 0), one 32-pixel RGBW fixture per tube, stride 4.
+#   tube 1  ch   1 .. 128
+#   tube 2  ch 129 .. 256
+#   tube 3  ch 257 .. 384
+#   tube 4  ch 385 .. 512
+
+log_level = "INFO"
+
+[core]
+prefixes = []
+
+[modules.artnet_bridge]
+enabled = true
+listen_host = "0.0.0.0"
+listen_port = 6454
+dest = "192.0.2.10"           # your Art-Net / DMX-over-IP node
+dest_port = 6454
+fps = 44.0
+personality = "rgbw"          # module default for every tube below
+pixels = 32
+
+# out_universe/out_address are the node side and do not change with front-end packing:
+# two tubes per output universe, at ch 1 and 227.
+[modules.artnet_bridge.tube.t1]
+in_universe = 0
+in_address = 1                # ch 1 .. 128
+out_universe = 0
+out_address = 1
+
+[modules.artnet_bridge.tube.t2]
+in_universe = 0
+in_address = 129              # ch 129 .. 256
+out_universe = 0
+out_address = 227
+
+[modules.artnet_bridge.tube.t3]
+in_universe = 0
+in_address = 257             # ch 257 .. 384
+out_universe = 1
+out_address = 1
+
+[modules.artnet_bridge.tube.t4]
+in_universe = 0
+in_address = 385             # ch 385 .. 512
+out_universe = 1
+out_address = 227

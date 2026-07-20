@@ -36,9 +36,54 @@ a setting).
 
 - `neewerd/__main__.py` — entrypoint: load + validate config → start `neewer.Fleet` → start modules.
 - `neewerd/modules/` — I/O front-ends (`socket`, `mqtt`, `osc`, `http`, `artnet`, `sacn`) + the bundled web UIs. The `artnet` module drives tubes from DMX-over-IP with four personalities (`hsi` / `cct` / `rgb` / `rgbw`), so RGB/RGBW sources such as LedFx work directly; it paces BLE writes with a per-connection governor (auto-tuning, zero-config) so a fast source can't back up the Bluetooth transmit queue, and reports per-tube pacing telemetry (rate / bandwidth / latency / deferred).
+- `neewerd/modules/artnet_bridge.py` — an Art-Net-to-Art-Net bridge that wraps a plain RGB/RGBW/RGBCW/RGBAW pixel stream into the TL120C 32-pixel-custom personality and unicasts it to an Art-Net (DMX-over-IP) node that feeds the tubes over wired DMX512. It carries no BLE code. See [Art-Net pixel bridge](#art-net-pixel-bridge).
 - `neewerd/client.py` — `DaemonClient`: the shared async client of the daemon's `/api/v1` HTTP layer (no `bleak`, no `neewer` BLE code). Consumed by `neewer-mcp`.
 - `neewerd/mcp_server.py` — the MCP tools, built on `DaemonClient`.
 - `neewerd/socketpath.py` — shared command-socket path resolver.
+
+## Art-Net pixel bridge
+
+The `artnet_bridge` module is the one front-end that does not drive Bluetooth. It
+takes a simple pixel stream in and sends Art-Net back out, wrapped in the per-pixel
+personality the TL tubes expose over wired DMX.
+
+That personality is not a flat RGB strip. The start channel selects the mode, the
+next channel sets the pixel count, and every pixel then occupies seven channels:
+colour-mode, brightness, R, G, B, cold-white, warm-white. Most pixel software only
+emits flat RGB or RGBW and cannot write that layout. The bridge lets the source stay
+simple. Point it at the bridge as a normal strip, and the bridge writes the header
+and the seven-channel pixels on the way out to an Art-Net node, which drives the
+tubes over wired DMX512.
+
+```
+pixel source (RGB / RGBW)  ->  artnet_bridge  ->  Art-Net node  ->  wired DMX512  ->  tubes
+```
+
+Each tube is one entry mapping an input slice to an output slice:
+
+```toml
+[modules.artnet_bridge]
+enabled = true
+dest = "192.0.2.10"     # the Art-Net node's IP
+personality = "rgb"     # input stride: rgb=3  rgbw=4  rgbcw/rgbaw/rgbwa=5 channels/pixel
+pixels = 32
+
+[modules.artnet_bridge.tube.left]
+in_universe = 0
+in_address = 1
+out_universe = 0
+out_address = 1
+```
+
+The output is always the 32-pixel RGBCW wrap; only the input stride changes with
+`personality`. With `rgbw` a single white channel drives both the cold and warm
+emitters (a neutral white); `rgbcw` passes cold and warm through separately; `rgbaw`
+and `rgbwa` map a console fixture's white and amber onto cold and warm for approximate
+colour temperature. `personality` and `pixels` are per tube (each falls back to the
+module default), so one rig can mix formats or bin-pack several tubes into a universe,
+and the loader rejects any input or output slice that overruns 512. Two tubes fit one
+output universe at addresses 1 and 227 (each block is 2 + 32×7 = 226 channels). Every
+knob is documented in `neewerd.example.toml`, with worked examples in `examples/`.
 
 ## HTTP API
 

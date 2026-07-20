@@ -12,6 +12,20 @@ A thin I/O daemon over the [`neewer`](https://pypi.org/project/neewer/) library.
 - I/O modules — `socket`, `http` (REST `/api/v1` + legacy + bundled UIs), `mqtt`
   (Home Assistant discovery), `osc`, `artnet`, `sacn` — plus the `neewer-mcp`
   stdio MCP server.
+- **`artnet_bridge` module.** Receives a plain pixel stream (RGB, RGBW, RGBCW, or
+  RGBAW/RGBWA, N channels per pixel) and re-sends it as Art-Net in the TL120C
+  32-pixel-custom personality, unicast to an Art-Net (DMX-over-IP) node that outputs
+  wired DMX512 to the tubes. The source is set up as an ordinary strip; the module
+  writes the mode and pixel-count header, the seven-channels-per-pixel RGBCW layout,
+  and the cold/warm-white mapping. `rgbaw`/`rgbwa` map a console fixture's white and
+  amber onto the tube's cold and warm white, for approximate colour temperature from a
+  source with no dedicated cold/warm split. It does no BLE work: Art-Net in, Art-Net
+  out. Each tube maps one input slice `(in_universe, in_address)` to one output slice
+  `(out_universe, out_address)` under `[modules.artnet_bridge.tube.<name>]`, and may
+  set its own `personality`/`pixels` (otherwise it inherits the module default), so one
+  rig can mix front-end formats or bin-pack several tubes into a universe. The loader
+  rejects any tube whose input or output slice runs past channel 512. The config surface
+  is documented in `neewerd.example.toml`, with worked examples in `examples/`.
 - **`neewerd.client.DaemonClient`** — the shared daemon HTTP client, promoted out
   of the MCP module so `neewer-mcp` (and any script / a future `neewerctl` HTTP
   mode) consume one client, not three.

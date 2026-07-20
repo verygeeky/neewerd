@@ -1,6 +1,7 @@
-# The live config carries real MACs and broker credentials — never commit it.
-# Copy neewerd.example.toml to neewerd.toml and edit locally.
+# Live configs carry real MACs, node IPs, and broker credentials — never commit them.
+# Copy neewerd.example.toml to neewerd.toml (or a site name like luna.toml) and edit locally.
 neewerd.toml
+luna.toml
 devices.toml
 
 # Python
